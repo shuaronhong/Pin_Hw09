@@ -1,0 +1,30 @@
+#python=3.11+
+# Core dependencies for MenuTranslator OCR Service
+paddlepaddle==2.6.1
+paddleocr>=2.7.0
+Flask==3.0.0
+flask-cors==4.0.0
+numpy>=1.19,<2.0
+
+# PaddleOCR dependencies (PyMuPDF and pdf2docx excluded - they cause build issues and are only needed for PDFs)
+shapely
+scikit-image
+imgaug
+pyclipper
+lmdb
+tqdm
+visualdl
+rapidfuzz
+opencv-python==4.6.0.66
+opencv-contrib-python==4.6.0.66
+cython
+lxml
+premailer
+openpyxl
+attrdict
+Pillow
+python-docx
+beautifulsoup4
+fonttools>=4.24.0
+fire>=0.3.0
+Flask-Limiter>=3.0.0

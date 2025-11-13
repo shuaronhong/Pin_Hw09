@@ -2,9 +2,12 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.utils import secure_filename
 import os
 import json
 import logging
+import uuid
+import traceback
 from functools import wraps
 from ocr import ocr_detection, ocr_filter_blocks, preload_models
 
@@ -76,6 +79,19 @@ def load_api_keys():
 # Load API keys at startup
 load_api_keys()
 
+# Configure image upload directory
+OCR_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGES_DIR = os.path.join(OCR_DIR, 'images')
+# Ensure images directory exists
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# Allowed file extensions for image uploads
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 def require_api_key(f):
     """Decorator to require valid API key for protected endpoints"""
     @wraps(f)
@@ -110,44 +126,80 @@ def process_image():
     """
     Complete OCR processing endpoint
     Performs both detection and filtering in one request
-    Expects JSON payload with 'image_path' field
-    Optional 'lang' parameter (default: 'japan')
-    Optional 'skip_resize' (bool) to tell OCR not to resize internally
-    Optional 'return_resized_coords' (bool) if true returns coords in resized space
+    Expects multipart/form-data with 'photo' file field
+    Optional 'lang' parameter (default: 'japan') - can be sent as form field or JSON
+    Optional 'skip_resize' (bool) - can be sent as form field or JSON
+    Optional 'return_resized_coords' (bool) - can be sent as form field or JSON
     """
+    saved_image_path = None
     try:
-        data = request.get_json()
+        # Handle file upload
+        try:
+            if 'photo' not in request.files:
+                return jsonify({'error': 'No photo file provided'}), 400
+        except Exception as files_error:
+            logger.error(f"Error accessing request.files: {str(files_error)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return jsonify({'error': 'Invalid request format'}), 400
         
-        if not data or 'image_path' not in data:
-            logger.error("No image_path provided in request")
-            return jsonify({'error': 'No image_path provided'}), 400
+        file = request.files['photo']
         
-        image_path = data['image_path']
-        lang = data.get('lang', 'japan')
-        skip_resize = bool(data.get('skip_resize', False))
-        return_resized_coords = bool(data.get('return_resized_coords', False))
+        # Check if file is selected
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Check if file type is allowed
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'Invalid file type. Allowed types: png, jpg, jpeg, gif, webp'}), 400
+        
+        # Generate unique photo_id
+        photo_id = str(uuid.uuid4())
+        
+        # Save file with photo_id as filename
+        filename = secure_filename(file.filename)
+        file_extension = filename.rsplit('.', 1)[1].lower()
+        saved_filename = f"{photo_id}.{file_extension}"
+        saved_image_path = os.path.join(IMAGES_DIR, saved_filename)
+        
+        # Save the file
+        file.save(saved_image_path)
+        logger.info(f"Saved uploaded file to: {saved_image_path}")
+        
+        # Get optional parameters from form data or JSON
+        # Try to get from form data first, then from JSON if available
+        if request.form:
+            lang = request.form.get('lang', 'japan')
+            skip_resize = bool(request.form.get('skip_resize', 'false').lower() == 'true')
+            return_resized_coords = bool(request.form.get('return_resized_coords', 'false').lower() == 'true')
+        else:
+            # Fallback to JSON if form data is not available
+            data = request.get_json(silent=True) or {}
+            lang = data.get('lang', 'japan')
+            skip_resize = bool(data.get('skip_resize', False))
+            return_resized_coords = bool(data.get('return_resized_coords', False))
         
         logger.info(f"Received image processing request")
-        logger.info(f"Image path: {image_path}")
+        logger.info(f"Saved image path: {saved_image_path}")
         logger.info(f"Language: {lang}")
+        logger.info(f"Skip resize: {skip_resize}")
+        logger.info(f"Return resized coords: {return_resized_coords}")
         
-        # Check if file exists
-        if not os.path.exists(image_path):
-            logger.error(f"Image file not found at path: {image_path}")
-            return jsonify({'error': f'Image file not found: {image_path}'}), 404
+        # Check if file exists and is readable
+        if not os.path.exists(saved_image_path):
+            logger.error(f"Image file not found at path: {saved_image_path}")
+            return jsonify({'error': f'Image file not found: {saved_image_path}'}), 404
         
-        file_size = os.path.getsize(image_path)
+        file_size = os.path.getsize(saved_image_path)
         logger.info(f"File exists, size: {file_size} bytes")
         
-        # Check if file is readable
-        if not os.access(image_path, os.R_OK):
-            logger.error(f"File exists but is not readable: {image_path}")
-            return jsonify({'error': f'Image file is not readable: {image_path}'}), 403
+        if not os.access(saved_image_path, os.R_OK):
+            logger.error(f"File exists but is not readable: {saved_image_path}")
+            return jsonify({'error': f'Image file is not readable: {saved_image_path}'}), 403
         
         logger.info(f"File is readable, starting OCR detection...")
         
         # Perform OCR detection
-        ocr_result = ocr_detection(image_path, lang=lang, skip_resize=skip_resize)
+        ocr_result = ocr_detection(saved_image_path, lang=lang, skip_resize=skip_resize)
         logger.info(f"OCR detection completed")
         logger.debug(f"Raw OCR result length: {len(ocr_result) if ocr_result else 0}")
         
@@ -164,7 +216,7 @@ def process_image():
                 'text_blocks': text_blocks,
                 'total_blocks': len(text_blocks),
                 'language': lang,
-                'image_path': image_path,
+                'image_path': saved_image_path,
                 'image_width': image_dimensions.get('image_width'),
                 'image_height': image_dimensions.get('image_height'),
                 'scale_factor': image_dimensions.get('scale_factor', 1.0),
@@ -180,9 +232,17 @@ def process_image():
         
     except Exception as e:
         logger.error(f"Exception occurred: {str(e)}")
-        import traceback
         logger.error(f"Traceback:\n{traceback.format_exc()}")
         return jsonify({'error': f'OCR processing failed: {str(e)}'}), 500
+    
+    finally:
+        # Clean up temporary file after processing
+        if saved_image_path and os.path.exists(saved_image_path):
+            try:
+                os.remove(saved_image_path)
+                logger.info(f"Cleaned up temporary file: {saved_image_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up temporary file {saved_image_path}: {str(cleanup_error)}")
 
 
 if __name__ == '__main__':
